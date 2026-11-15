@@ -1,0 +1,204 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    networks:
+      - edge
+    ports:
+      - "8080:80"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - chat-api
+
+  chat-api:
+    build:
+      context: .
+      dockerfile: services/chat-api/Dockerfile
+    networks:
+      - edge
+      - data
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CHAT_MODEL: ${CHAT_MODEL:-openai/gpt-4o-mini}
+      DATABASE_URL: postgresql://chat:chatpass@postgres-router:5432/chat
+      REDIS_URL: redis://:redispass@redis:6379/0
+      RABBIT_USER: chat
+      RABBIT_PASSWORD: rabbitpass
+      RABBIT_HOSTS: rabbitmq-1,rabbitmq-2,rabbitmq-3
+    depends_on:
+      postgres-router:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq-1:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    networks:
+      - data
+      - egress
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CHAT_MODEL: ${CHAT_MODEL:-openai/gpt-4o-mini}
+      DATABASE_URL: postgresql://chat:chatpass@postgres-router:5432/chat
+      REDIS_URL: redis://:redispass@redis:6379/0
+      RABBIT_USER: chat
+      RABBIT_PASSWORD: rabbitpass
+      RABBIT_HOSTS: rabbitmq-1,rabbitmq-2,rabbitmq-3
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    depends_on:
+      postgres-router:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq-1:
+        condition: service_healthy
+
+  postgres-primary:
+    image: postgres:16
+    networks:
+      - data
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chatpass
+      POSTGRES_DB: chat
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/primary-replication.sh:/docker-entrypoint-initdb.d/02-replication.sh:ro
+      - postgres-primary-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chat", "-d", "chat"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres-standby:
+    image: postgres:16
+    networks:
+      - data
+    entrypoint: ["/standby-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chatpass
+      POSTGRES_DB: chat
+    volumes:
+      - ./infra/postgres/standby-entrypoint.sh:/standby-entrypoint.sh:ro
+      - postgres-standby-data:/var/lib/postgresql/data
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chat"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+
+  postgres-router:
+    image: haproxy:2.8-alpine
+    networks:
+      - data
+    volumes:
+      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pidof", "haproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - data
+    command: ["redis-server", "--requirepass", "redispass", "--appendonly", "yes"]
+
+  rabbitmq-1:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq-1
+    networks:
+      - data
+    ports:
+      - "15672:15672"
+    environment:
+      RABBITMQ_ERLANG_COOKIE: bvschatcookie
+      RABBITMQ_DEFAULT_USER: chat
+      RABBITMQ_DEFAULT_PASS: rabbitpass
+      RABBITMQ_NODENAME: rabbit@rabbitmq-1
+    entrypoint: ["/bin/bash", "/primary.sh"]
+    volumes:
+      - ./infra/rabbit/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./infra/rabbit/primary.sh:/primary.sh:ro
+      - ./infra/rabbit/declare.sh:/declare.sh:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  rabbitmq-2:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq-2
+    networks:
+      - data
+    environment:
+      RABBITMQ_ERLANG_COOKIE: bvschatcookie
+      RABBITMQ_NODENAME: rabbit@rabbitmq-2
+    entrypoint: ["/bin/bash", "/join.sh"]
+    volumes:
+      - ./infra/rabbit/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./infra/rabbit/join.sh:/join.sh:ro
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  rabbitmq-3:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq-3
+    networks:
+      - data
+    environment:
+      RABBITMQ_ERLANG_COOKIE: bvschatcookie
+      RABBITMQ_NODENAME: rabbit@rabbitmq-3
+    entrypoint: ["/bin/bash", "/join.sh"]
+    volumes:
+      - ./infra/rabbit/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./infra/rabbit/join.sh:/join.sh:ro
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+networks:
+  edge:
+    enable_ipv6: false
+  data:
+    internal: true
+    enable_ipv6: false
+  egress:
+    enable_ipv6: false
+
+volumes:
+  postgres-primary-data:
+  postgres-standby-data:

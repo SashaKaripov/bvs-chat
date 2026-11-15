@@ -1,0 +1,42 @@
+body {
+  box-sizing: border-box;
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+  font-family: system-ui, sans-serif;
+  background: #f6f5f2;
+  color: #1c1b19;
+}
+
+textarea,
+button {
+  font: inherit;
+  max-width: 100%;
+}
+
+textarea {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  margin: 0.5rem 0;
+}
+
+button {
+  background: #3d5c54;
+  color: #fff;
+  border: 0;
+  padding: 0.4rem 0.7rem;
+}
+
+.message {
+  margin: 0.8rem 0;
+}
+
+.text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  color: #8d3b32;
+}
